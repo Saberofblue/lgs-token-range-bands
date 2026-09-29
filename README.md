@@ -1,3 +1,7 @@
+## Foundry VTT 13/14 build (v2.0.0)
+
+This build (github.com/Saberofblue/lgs-token-range-bands) runs on Foundry 13 and 14. Range bands are drawn on the canvas and shared with every client on the scene (Foundry 14 removed the measured templates the original used), and the narrative labels apply to both the drag ruler and the token ruler introduced in Foundry 13. Configuration, the Token HUD button and the Scene Configuration fields work as before. Requires libWrapper.
+
 # Lyinggods Token Range Bands and Narrative Drag Ruler
 
 This modules creates range bands and modifies the drag ruler to support abstracted range bands such as far, close, medium, etc instead of dealing with fiddly feet or meters.
