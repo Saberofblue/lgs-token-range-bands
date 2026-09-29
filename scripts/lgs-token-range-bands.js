@@ -1,206 +1,409 @@
-// =============== Initialization and World Settings ===============
-Hooks.once("init", () => {
-  console.log("lgs-token-range-bands | Initializing...");
+/**
+ * Lyinggods Token Range Bands - Foundry VTT 13/14 build.
+ *
+ * Range bands are drawn on the canvas interface layer (Foundry 14 removed MeasuredTemplates, which
+ * the original used) and mirrored to every client over the module socket. The narrative labels are
+ * applied to both rulers Foundry 13 introduced: the drag ruler (Ruler) and the token ruler
+ * (TokenRuler), through their waypoint label context.
+ */
+const MODULE_ID = "lgs-token-range-bands";
+const SOCKET = `module.${MODULE_ID}`;
+const BAND_COLORS = ["#C75153", "#D3BE82", "#BBD8AB", "#63856B", "#7aa384", "#95c7a1", "#aae3b8", "#c8fad4", "#9df5b2"];
+const DEFAULT_RANGES = [
+  { name: "Short Range", distance: 2 },
+  { name: "Medium Range", distance: 5 },
+  { name: "Long Range", distance: 10 },
+  { name: "Extreme Range", distance: 20 },
+];
 
-  // Register a world setting to store the distance configuration (the range bands)
-  game.settings.register("lgs-token-range-bands", "distanceConfig", {
+/* -------------------------------------------- */
+/*  Settings                                    */
+/* -------------------------------------------- */
+
+Hooks.once("init", () => {
+  console.log(`${MODULE_ID} | Initializing`);
+
+  game.settings.register(MODULE_ID, "distanceConfig", {
     name: "Distance Configuration",
     scope: "world",
     config: false,
     type: Object,
-    default: []
+    default: [],
   });
 
-  // Register a client (world) setting for the default size multiplier.
-  // This value is used when a new scene is created to set the "Range Band Multiplier" flag.
-  game.settings.register("lgs-token-range-bands", "sizeMultiplier", {
+  game.settings.register(MODULE_ID, "sizeMultiplier", {
     name: "Size Multiplier",
     hint: "The default value for determining relative size of range bands relative to grid/token size. Change based on expected scale of maps. Recommend values between 5-10. Individual scenes are customizable via Scene Configuration",
     scope: "client",
     config: true,
     default: 5,
-    type: Number
+    type: Number,
   });
 
-  game.settings.register("lgs-token-range-bands", "exceedRangeMessage", {
+  game.settings.register(MODULE_ID, "exceedRangeMessage", {
     name: "Exceeds Range Message",
     hint: "The message to be shown when narrative drag ruler exceeds maximum range",
     scope: "client",
     config: true,
     default: "Exceeds Range",
-    type: String
+    type: String,
   });
 
-  // Register a settings menu to configure the distance ranges.
-  game.settings.registerMenu("lgs-token-range-bands", "distanceConfigMenu", {
+  game.settings.registerMenu(MODULE_ID, "distanceConfigMenu", {
     name: "Configure Distance Ranges",
     label: "Configure",
     hint: "Set up the narrative range distance categories.",
     icon: "fas fa-ruler-combined",
     type: DistanceConfigApp,
-    restricted: true
+    restricted: true,
   });
 
-  game.settings.register("lgs-token-range-bands", "dragRulerApproximation", {
+  game.settings.register(MODULE_ID, "dragRulerApproximation", {
     name: "Drag Ruler Approximation",
     hint: "When grid type is 'square' attempts to compensate for system Euclidean calculations so that drag ruler approximates range bands on diagonal measurements. This has no effect if scene grid type is not 'Square'.",
     scope: "world",
     config: true,
     type: Boolean,
-    default: false
+    default: false,
   });
 
-  // ----------------- Socket Integration -----------------
-  game.socket.on("module.lgs-token-range-bands", async (data) => {
-    // (Avoid processing our own socket message.)
-    if (data.senderId === game.user.id) return;
-
-    if (data.action === "updateMultiplier") {
-      const scene = game.scenes.get(data.sceneId);
-      if (!scene) return;
-      // Only the GM with update permission (typically the scene owner) is allowed to update the scene flag.
-      if (scene.testUserPermission(game.user, "UPDATE")) {
-        await scene.setFlag("lgs-token-range-bands", "rangeBandMultiplier", data.multiplier);
-        ui.notifications.info(`Range Band Multiplier updated to ${data.multiplier} via socket.`);
-        // After updating the flag, broadcast a message so that every client forces a refresh.
-        game.socket.emit("module.lgs-token-range-bands", {
-          action: "multiplierUpdated",
-          multiplier: data.multiplier,
-          sceneId: data.sceneId,
-          senderId: game.user.id
-        });
+  // Narrative labels on both rulers
+  for (const target of [
+    "foundry.canvas.interaction.Ruler.prototype._getWaypointLabelContext",
+    "foundry.canvas.placeables.tokens.TokenRuler.prototype._getWaypointLabelContext",
+  ]) {
+    libWrapper.register(MODULE_ID, target, function (wrapped, waypoint, state, ...rest) {
+      const context = wrapped(waypoint, state, ...rest);
+      try {
+        return applyNarrativeLabel(context, waypoint);
+      } catch (err) {
+        console.error(`${MODULE_ID} | failed to apply the narrative range label`, err);
+        return context;
       }
-    } else if (data.action === "multiplierUpdated") {
-      if (canvas.scene && canvas.scene.id === data.sceneId) {
-        // A redraw causes the range bands to be recalculated on next use.
-        canvas.draw();
-      }
-    } else if (data.action === "deleteTemplates" && game.user.isGM) {
-      // GM-only action to delete templates by their IDs.
-      const scene = game.scenes.get(data.sceneId);
-      if (scene) {
-        // Filter out IDs that might already have been deleted to prevent errors.
-        const existingTemplateIds = data.templateIds.filter(id => scene.templates.has(id));
-        if (existingTemplateIds.length > 0) {
-          await scene.deleteEmbeddedDocuments("MeasuredTemplate", existingTemplateIds);
-        }
-      }
-    }
-  });
-  // --------------------------------------------------------
-
-  // Wrap the ruler’s segment label function so that the configured ranges are multiplied
-  // by the scene’s rangeBandMultiplier flag.
-  libWrapper.register(
-    "lgs-token-range-bands",
-    "Ruler.prototype._getSegmentLabel",
-    function (wrapped, ...args) {
-      // Call the original method to get the label which includes the measured distance.
-      const originalLabel = wrapped(...args);
-      const distances = game.settings.get("lgs-token-range-bands", "distanceConfig");
-      const exceedsRangeMessage = game.settings.get("lgs-token-range-bands", "exceedRangeMessage");
-      let narrativeLabel = "Range Exceeded";
-
-      // Retrieve the Range Band Multiplier from the active scene (default to 1 if not set).
-      const multiplier = canvas.scene?.getFlag("lgs-token-range-bands", "rangeBandMultiplier") || 1;
-
-      // Retrieve the measurement display option from the active scene flag (default to "narrative")
-      const measurementOption = canvas.scene?.getFlag("lgs-token-range-bands", "measurementOption") || "narrative";
-
-      // Get the drag ruler approximation setting.
-      const useApprox = game.settings.get("lgs-token-range-bands", "dragRulerApproximation");
-      const activeScene = game.scenes.active;
-      const gridtype = activeScene.grid.type;
-
-      let measuredDistance = parseFloat(originalLabel.match(/([\d.]+)/)?.[1] || 0);
-
-      if (useApprox && gridtype == 1) {
-        // --- APPROXIMATION LOGIC FOR DIAGONALS ---
-        let angleAdjustment = 1;
-        const segment = args[0];
-        if (segment && segment.ray) {
-          const dx = Math.abs(segment.ray.dx);
-          const dy = Math.abs(segment.ray.dy);
-          if (dx !== 0 || dy !== 0) {
-            const angle = Math.atan2(dy, dx);
-            const diff = Math.min(angle, Math.abs(Math.PI / 2 - angle));
-            const t = diff / (Math.PI / 4);
-            angleAdjustment = 1 - t * (1 - 0.71875);
-          }
-        }
-        for (let { name, distance } of distances.sort((a, b) => a.distance - b.distance)) {
-          const effectiveThreshold = distance * multiplier * angleAdjustment;
-          if (measuredDistance <= effectiveThreshold) {
-            narrativeLabel = name;
-            break;
-          }
-        }
-      } else {
-        // --- ORIGINAL LOGIC (No Diagonal Compensation) ---
-        for (let { name, distance } of distances.sort((a, b) => a.distance - b.distance)) {
-          if (measuredDistance <= (distance * multiplier)) {
-            narrativeLabel = name;
-            break;
-          }
-        }
-      }
-
-      // set color if range exceeded
-      if (narrativeLabel == "Range Exceeded") {
-        args[0].label._tintRGB = 721024; // dark red
-        narrativeLabel = exceedsRangeMessage;
-      } else {
-        args[0].label._tintRGB = 16777215; // white
-      }
-
-      // Return the label based on the measurement option.
-      // "narrative"  => Narrative Drag Ruler Only (narrative text only)
-      // "addToMeasurements" => Add to Measurements (numeric + narrative)
-      // "numeric"    => Only Numeric Measurements Only (numeric only)
-      switch (measurementOption) {
-        case "addToMeasurements":
-          return `${originalLabel}\n${narrativeLabel}`;
-        case "numeric":
-          return originalLabel;
-        case "narrative":
-        default:
-          return narrativeLabel;
-      }
-    },
-    "WRAPPER"
-  );
+    }, "WRAPPER");
+  }
 });
 
-// =============== Distance Configuration Dialog (with Drag & Drop and Reset Button) ===============
+Hooks.once("ready", async () => {
+  if (!game.settings.get(MODULE_ID, "distanceConfig")) {
+    await game.settings.set(MODULE_ID, "distanceConfig", []);
+  }
+
+  game.socket.on(SOCKET, (data) => {
+    if (!data || data.senderId === game.user.id) return;
+    if (!canvas.ready || data.sceneId !== canvas.scene?.id) return;
+    if (data.action === "showBands") RangeBands.draw(data.tokenId);
+    else if (data.action === "clearBands") RangeBands.clear(data.tokenId);
+  });
+});
+
+/* -------------------------------------------- */
+/*  Narrative ruler labels                      */
+/* -------------------------------------------- */
+
+/**
+ * Sorted range configuration.
+ * @returns {{name: string, distance: number}[]}
+ */
+function sortedRanges() {
+  const config = game.settings.get(MODULE_ID, "distanceConfig") || [];
+  return config
+    .filter((r) => r && Number.isFinite(Number(r.distance)))
+    .map((r) => ({ name: r.name, distance: Number(r.distance) }))
+    .sort((a, b) => a.distance - b.distance);
+}
+
+/**
+ * Replace (or extend) the measured distance in a ruler waypoint label with the narrative range band.
+ * The waypoint label template shows `cost` when the ruler provides it (the token ruler always does),
+ * otherwise `distance`; whichever is shown carries the band name.
+ * @param {object|undefined} context  The label context built by Foundry, or undefined for no label.
+ * @param {object} waypoint           The ruler waypoint.
+ * @returns {object|undefined}
+ */
+function applyNarrativeLabel(context, waypoint) {
+  if (!context) return context;
+  const measurementOption = canvas.scene?.getFlag(MODULE_ID, "measurementOption") || "narrative";
+  if (measurementOption === "numeric") return context;
+  const ranges = sortedRanges();
+  if (!ranges.length) return context;
+
+  const multiplier = canvas.scene?.getFlag(MODULE_ID, "rangeBandMultiplier") || 1;
+  const measured = Number(waypoint?.measurement?.distance ?? 0);
+
+  // Optional compensation for square-grid diagonals (kept from the original implementation)
+  let angleAdjustment = 1;
+  if (game.settings.get(MODULE_ID, "dragRulerApproximation") && (canvas.grid.type === CONST.GRID_TYPES.SQUARE) && waypoint?.ray) {
+    const dx = Math.abs(waypoint.ray.dx);
+    const dy = Math.abs(waypoint.ray.dy);
+    if (dx !== 0 || dy !== 0) {
+      const angle = Math.atan2(dy, dx);
+      const diff = Math.min(angle, Math.abs(Math.PI / 2 - angle));
+      const t = diff / (Math.PI / 4);
+      angleAdjustment = 1 - t * (1 - 0.71875);
+    }
+  }
+
+  let label = null;
+  for (const { name, distance } of ranges) {
+    if (measured <= distance * multiplier * angleAdjustment) {
+      label = name;
+      break;
+    }
+  }
+  if (label === null) {
+    label = game.settings.get(MODULE_ID, "exceedRangeMessage") || "Exceeds Range";
+    context.cssClass = [context.cssClass, "lgs-range-exceeded"].filterJoin(" ");
+  }
+
+  const target = context.cost ?? context.distance;
+  if (!target) return context;
+  if (measurementOption === "addToMeasurements") {
+    const numeric = `${target.total ?? ""} ${context.units ?? ""}`.trim();
+    target.total = numeric ? `${numeric} · ${label}` : label;
+  } else {
+    target.total = label;
+  }
+  delete target.delta;
+  context.units = "";
+  if (context.cost) context.cost.units = "";
+  return context;
+}
+
+/* -------------------------------------------- */
+/*  Range band drawing                          */
+/* -------------------------------------------- */
+
+class RangeBands {
+  /** @type {PIXI.Container|null} */
+  static #layer = null;
+
+  /** Drawn bands, keyed by token id. @type {Map<string, PIXI.Container>} */
+  static #bands = new Map();
+
+  static get layer() {
+    if (!this.#layer || this.#layer.destroyed || this.#layer.parent !== canvas.interface) {
+      this.#layer = new PIXI.Container();
+      this.#layer.name = MODULE_ID;
+      this.#layer.eventMode = "none";
+      canvas.interface.addChild(this.#layer);
+    }
+    return this.#layer;
+  }
+
+  static has(tokenId) {
+    return this.#bands.has(tokenId);
+  }
+
+  static get tokenIds() {
+    return [...this.#bands.keys()];
+  }
+
+  /** Forget everything (the canvas is being torn down or rebuilt). */
+  static reset() {
+    for (const c of this.#bands.values()) if (!c.destroyed) c.destroy({ children: true });
+    this.#bands.clear();
+    if (this.#layer && !this.#layer.destroyed) this.#layer.destroy({ children: true });
+    this.#layer = null;
+  }
+
+  static clear(tokenId) {
+    const c = this.#bands.get(tokenId);
+    if (c && !c.destroyed) c.destroy({ children: true });
+    this.#bands.delete(tokenId);
+    canvas.tokens.hud?.render();
+  }
+
+  /**
+   * Draw the configured range bands around a token.
+   * @param {string} tokenId
+   * @returns {boolean} whether bands were drawn
+   */
+  static draw(tokenId) {
+    this.clear(tokenId);
+    const token = canvas.tokens.get(tokenId);
+    if (!token) return false;
+    const ranges = sortedRanges();
+    if (!ranges.length) {
+      ui.notifications.warn("Token Range Bands: no ranges configured. Configure them in the module settings.");
+      return false;
+    }
+    const multiplier = canvas.scene.getFlag(MODULE_ID, "rangeBandMultiplier") || game.settings.get(MODULE_ID, "sizeMultiplier") || 1;
+    const pxPerUnit = canvas.dimensions.size / canvas.dimensions.distance;
+    const { x: cx, y: cy } = token.center;
+
+    const group = new PIXI.Container();
+    group.eventMode = "none";
+    // outermost first so the inner bands draw on top
+    for (let i = ranges.length - 1; i >= 0; i--) {
+      const radius = ranges[i].distance * multiplier * pxPerUnit;
+      const fill = foundry.utils.Color.from(BAND_COLORS[i] ?? "#ffffff");
+      const shape = new PIXI.Graphics();
+      shape.lineStyle(2, 0x0000ff, 0.8).beginFill(fill, 0.25).drawCircle(cx, cy, radius).endFill();
+      group.addChild(shape);
+
+      const style = CONFIG.canvasTextStyle.clone();
+      style.fontSize = Math.round(22 * canvas.dimensions.uiScale);
+      const label = new foundry.canvas.containers.PreciseText(ranges[i].name, style);
+      label.anchor.set(0.5, 1);
+      label.position.set(cx, cy - radius - 2);
+      group.addChild(label);
+    }
+    this.layer.addChild(group);
+    this.#bands.set(tokenId, group);
+    canvas.tokens.hud?.render();
+    return true;
+  }
+
+  static redrawAll() {
+    for (const id of this.tokenIds) this.draw(id);
+  }
+}
+
+/**
+ * Toggle the range bands of a token, here and on every other client looking at this scene.
+ * @param {Token} token
+ */
+function toggleRangeBands(token) {
+  const tokenId = token.id;
+  const sceneId = canvas.scene.id;
+  if (RangeBands.has(tokenId)) {
+    RangeBands.clear(tokenId);
+    game.socket.emit(SOCKET, { action: "clearBands", tokenId, sceneId, senderId: game.user.id });
+  } else if (RangeBands.draw(tokenId)) {
+    game.socket.emit(SOCKET, { action: "showBands", tokenId, sceneId, senderId: game.user.id });
+  }
+}
+
+Hooks.on("canvasReady", () => RangeBands.reset());
+Hooks.on("canvasTearDown", () => RangeBands.reset());
+
+// bands follow nothing: a token that moves (or changes size) loses its bands, on every client
+Hooks.on("updateToken", (tokenDoc, changes) => {
+  if (!canvas.ready || tokenDoc.parent?.id !== canvas.scene?.id) return;
+  if (!RangeBands.has(tokenDoc.id)) return;
+  if (["x", "y", "elevation", "width", "height"].some((k) => k in changes)) RangeBands.clear(tokenDoc.id);
+});
+
+Hooks.on("deleteToken", (tokenDoc) => {
+  if (canvas.ready && RangeBands.has(tokenDoc.id)) RangeBands.clear(tokenDoc.id);
+});
+
+// a changed multiplier resizes bands that are currently shown
+Hooks.on("updateScene", (scene, changes) => {
+  if (!canvas.ready || scene.id !== canvas.scene?.id) return;
+  if (foundry.utils.getProperty(changes, `flags.${MODULE_ID}.rangeBandMultiplier`) !== undefined) RangeBands.redrawAll();
+});
+
+/* -------------------------------------------- */
+/*  Token HUD button                            */
+/* -------------------------------------------- */
+
+Hooks.on("renderTokenHUD", (hud, html) => {
+  const root = html instanceof HTMLElement ? html : html?.[0];
+  const token = hud.object;
+  if (!root || !token) return;
+  const column = root.querySelector(".col.right");
+  if (!column || column.querySelector(".lgs-range-bands")) return;
+
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "control-icon lgs-range-bands";
+  button.classList.toggle("active", RangeBands.has(token.id));
+  button.dataset.tooltip = "Toggle Range Bands";
+  button.setAttribute("aria-label", "Toggle Range Bands");
+  button.innerHTML = '<i class="fas fa-circle" inert></i>';
+  button.addEventListener("click", (event) => {
+    event.preventDefault();
+    toggleRangeBands(token);
+    button.classList.toggle("active", RangeBands.has(token.id));
+  });
+  column.append(button);
+});
+
+/* -------------------------------------------- */
+/*  Scene configuration fields                  */
+/* -------------------------------------------- */
+
+Hooks.on("renderSceneConfig", (app, html) => {
+  const root = html instanceof HTMLElement ? html : html?.[0];
+  const scene = app.document ?? app.object;
+  if (!root || !scene) return;
+  const gridTab = root.querySelector('.tab[data-tab="grid"], [data-tab="grid"]');
+  if (!gridTab || gridTab.querySelector(".lgs-range-bands-config")) return;
+
+  const multiplier = scene.getFlag(MODULE_ID, "rangeBandMultiplier") ?? game.settings.get(MODULE_ID, "sizeMultiplier");
+  const measurementOption = scene.getFlag(MODULE_ID, "measurementOption") || "narrative";
+  const options = [
+    ["narrative", "Narrative Drag Ruler Only"],
+    ["addToMeasurements", "Add to Measurements"],
+    ["numeric", "Numeric Measurements Only"],
+  ].map(([v, l]) => `<option value="${v}" ${measurementOption === v ? "selected" : ""}>${l}</option>`).join("");
+
+  const fieldset = document.createElement("fieldset");
+  fieldset.className = "lgs-range-bands-config";
+  fieldset.innerHTML = `
+    <legend>Narrative Range Bands</legend>
+    <p class="hint">Recommend the Gridless grid type for range bands and the narrative ruler.</p>
+    <div class="form-group">
+      <label>Range Band Multiplier</label>
+      <div class="form-fields">
+        <input type="number" name="flags.${MODULE_ID}.rangeBandMultiplier" value="${multiplier}" step="0.1" min="0">
+      </div>
+      <p class="hint">Sets the size of the range bands for this scene.</p>
+    </div>
+    <div class="form-group">
+      <label>Measurement Display Option</label>
+      <div class="form-fields">
+        <select name="flags.${MODULE_ID}.measurementOption">${options}</select>
+      </div>
+    </div>`;
+  gridTab.append(fieldset);
+});
+
+// new scenes start with the default multiplier
+Hooks.on("createScene", async (scene, options, userId) => {
+  if (userId !== game.user.id) return;
+  if (scene.getFlag(MODULE_ID, "rangeBandMultiplier") === undefined) {
+    await scene.setFlag(MODULE_ID, "rangeBandMultiplier", game.settings.get(MODULE_ID, "sizeMultiplier"));
+  }
+});
+
+/* -------------------------------------------- */
+/*  Distance configuration dialog               */
+/* -------------------------------------------- */
+
 class DistanceConfigApp extends FormApplication {
   static get defaultOptions() {
-    return mergeObject(super.defaultOptions, {
+    return foundry.utils.mergeObject(super.defaultOptions, {
       id: "distance-config",
       title: "Distance Configuration",
-      template: "modules/lgs-token-range-bands/templates/distance-config.html",
+      template: `modules/${MODULE_ID}/templates/distance-config.html`,
       width: 500,
       height: "auto",
-      closeOnSubmit: true
+      closeOnSubmit: true,
     });
   }
 
   getData() {
-    // Always return an array for distances—even if empty.
-    const distances = game.settings.get("lgs-token-range-bands", "distanceConfig") || [];
+    const distances = game.settings.get(MODULE_ID, "distanceConfig") || [];
     return { distances };
   }
 
   async _updateObject(event, formData) {
-    let distances = [];
-    // Ensure values are arrays even if only one row exists.
-    if (!Array.isArray(formData.name)) {
-      formData.name = [formData.name];
-      formData.distance = [formData.distance];
+    let names = formData.name ?? [];
+    let values = formData.distance ?? [];
+    if (!Array.isArray(names)) {
+      names = [names];
+      values = [values];
     }
-    for (let i = 0; i < formData.name.length; i++) {
-      distances.push({ name: formData.name[i], distance: Number(formData.distance[i]) });
+    const distances = [];
+    for (let i = 0; i < names.length; i++) {
+      if (!names[i]) continue;
+      distances.push({ name: names[i], distance: Number(values[i]) });
     }
-    await game.settings.set("lgs-token-range-bands", "distanceConfig", distances);
+    await game.settings.set(MODULE_ID, "distanceConfig", distances);
+    if (canvas.ready) RangeBands.redrawAll();
   }
 
   activateListeners(html) {
@@ -208,295 +411,57 @@ class DistanceConfigApp extends FormApplication {
     const app = this;
     let dragged = null;
 
-    // Helper: attach HTML5 drag-and-drop events to a row.
     function attachDragEvents(row) {
-      row.attr('draggable', true);
-      row.on('dragstart', (ev) => {
+      row.attr("draggable", true);
+      row.on("dragstart", (ev) => {
         dragged = ev.currentTarget;
-        $(dragged).addClass('dragging');
+        $(dragged).addClass("dragging");
       });
-      row.on('dragend', (ev) => {
-        $(dragged).removeClass('dragging');
+      row.on("dragend", () => {
+        $(dragged).removeClass("dragging");
         dragged = null;
       });
-      row.on('dragover', (ev) => {
-        ev.preventDefault();
-      });
-      row.on('drop', (ev) => {
+      row.on("dragover", (ev) => ev.preventDefault());
+      row.on("drop", (ev) => {
         ev.preventDefault();
         const target = ev.currentTarget;
         if (dragged && target !== dragged) {
-          // Insert the dragged row before the target row.
           $(dragged).insertBefore(target);
           app.setPosition();
         }
       });
     }
 
-    // Attach drag events to all existing rows.
-    html.find('.distance-row').each((i, row) => {
-      attachDragEvents($(row));
-    });
+    const rowHtml = (name, distance) => `
+      <div class="distance-row" style="padding-left:20px; cursor: move; margin-bottom: 5px;" draggable="true">
+        <input type="text" name="name" placeholder="Name" value="${name}" style="width:291px; margin-right:5px;">
+        <input type="number" name="distance" placeholder="Distance" value="${distance}" style="width:146px; margin-right:5px;">
+        <i class="fas fa-trash remove-row" style="cursor:pointer;"></i>
+      </div>`;
 
-    // Handle the Add Row button.
-    html.find('.add-row').click(ev => {
-      const newRow = $(`
-        <div class="distance-row" style="padding-left:20px; cursor: move; margin-bottom: 5px;" draggable="true">
-          <input type="text" name="name" placeholder="Name" value="" style="width:291px; margin-right:5px;">
-          <input type="number" name="distance" placeholder="Distance" value="" style="width:146px; margin-right:5px;">
-          <i class="fas fa-trash remove-row" style="cursor:pointer;"></i>
-        </div>
-      `);
-      html.find('.distance-rows').append(newRow);
+    html.find(".distance-row").each((i, row) => attachDragEvents($(row)));
+
+    html.find(".add-row").click(() => {
+      const newRow = $(rowHtml("", ""));
+      html.find(".distance-rows").append(newRow);
       attachDragEvents(newRow);
       app.setPosition();
     });
 
-    // Handle the Reset Ranges button.
-    html.find('.reset-ranges').click(ev => {
-      // Define the default ranges.
-      const defaultRanges = [
-        { name: "Short Range", distance: 2 },
-        { name: "Medium Range", distance: 5 },
-        { name: "Long Range", distance: 10 },
-        { name: "Extreme Range", distance: 20 }
-      ];
-      // Remove all rows except the header (assumed to be the first .distance-row).
-      const $rowsContainer = html.find('.distance-rows');
-      $rowsContainer.find('.distance-row:gt(0)').remove();
-
-      // Append a row for each default range.
-      for (let range of defaultRanges) {
-        const newRow = $(`
-          <div class="distance-row" style="padding-left:20px; cursor: move; margin-bottom: 5px;" draggable="true">
-            <input type="text" name="name" placeholder="Name" value="${range.name}" style="width:291px; margin-right:5px;">
-            <input type="number" name="distance" placeholder="Distance" value="${range.distance}" style="width:146px; margin-right:5px;">
-            <i class="fas fa-trash remove-row" style="cursor:pointer;"></i>
-          </div>
-        `);
-        $rowsContainer.append(newRow);
+    html.find(".reset-ranges").click(() => {
+      const $rows = html.find(".distance-rows");
+      $rows.find(".distance-row:gt(0)").remove();
+      for (const range of DEFAULT_RANGES) {
+        const newRow = $(rowHtml(range.name, range.distance));
+        $rows.append(newRow);
         attachDragEvents(newRow);
       }
       app.setPosition();
     });
 
-    // Handle removal of a row.
-    html.on('click', '.remove-row', ev => {
-      $(ev.currentTarget).closest('.distance-row').remove();
+    html.on("click", ".remove-row", (ev) => {
+      $(ev.currentTarget).closest(".distance-row").remove();
       app.setPosition();
     });
   }
 }
-
-// Initialize the distance configuration if needed.
-Hooks.once("ready", async () => {
-  if (!game.settings.get("lgs-token-range-bands", "distanceConfig")) {
-    await game.settings.set("lgs-token-range-bands", "distanceConfig", []);
-  }
-});
-
-// =============== Modify Scene Configuration Dialog ===============
-Hooks.on("renderSceneConfig", (app, html, data) => {
-  // Only modify Scene configuration dialogs (their id starts with "SceneConfig-Scene")
-  if (app.id && app.id.startsWith("SceneConfig-Scene")) {
-    const gridTab = html.find('div[data-tab="grid"]');
-    // Retrieve the stored Range Band Multiplier (or default to the sizeMultiplier setting)
-    const rangeBandMultiplier = app.object.getFlag("lgs-token-range-bands", "rangeBandMultiplier") ||
-      game.settings.get("lgs-token-range-bands", "sizeMultiplier");
-
-    // Create the field for Range Band Multiplier.
-    const rangeBandMultiplierDiv = $(`
-      <hr>
-      <b>Configure Narrative Drag Ruler</b><br>      
-      <div style="flex:none; font-size:10px"><i>Recommend grid type of <i>Gridless</i> for range bands and narrative drag ruler<br></div>
-      <div class="form-group">
-        <label>Range Band Multiplier</label>
-        <input type="number" name="flags.lgs-token-range-bands.rangeBandMultiplier" value="${rangeBandMultiplier}" step="0.1" style="width:40px;">
-      </div>
-      <div style="flex:none; font-size:10px"><i>Adjust <i>Range Band Multiplier</i> to set size of range bands per scene.</i></div>
-    `);
-
-    gridTab.append(rangeBandMultiplierDiv);
-
-    // Create and append the dropdown for Measurement Display Option.
-    const measurementOption = app.object.getFlag("lgs-token-range-bands", "measurementOption") || "narrative";
-    const measurementOptionDiv = $(`
-      <div class="form-group">
-        <label>Measurement Display Option</label>
-        <select name="flags.lgs-token-range-bands.measurementOption">
-          <option value="narrative" ${measurementOption === "narrative" ? "selected" : ""}>Narrative Drag Ruler Only</option>
-          <option value="addToMeasurements" ${measurementOption === "addToMeasurements" ? "selected" : ""}>Add to Measurements</option>
-          <option value="numeric" ${measurementOption === "numeric" ? "selected" : ""}>Only Numeric Measurements Only</option>
-        </select>
-      </div>
-    `);
-
-    gridTab.append(measurementOptionDiv);
-
-    // ----------------- Always use socket-based update -----------------
-    // Regardless of whether the current GM has update permission, any change
-    // to the multiplier input sends a socket event so that the designated GM
-    // (scene owner) can update the flag.
-    rangeBandMultiplierDiv.find('input[name="flags.lgs-token-range-bands.rangeBandMultiplier"]').on('change', function (ev) {
-      ev.preventDefault();
-      const newMultiplier = Number($(this).val());
-      game.socket.emit("module.lgs-token-range-bands", {
-        action: "updateMultiplier",
-        multiplier: newMultiplier,
-        sceneId: app.object.id,
-        senderId: game.user.id
-      });
-      //ui.notifications.info("Requested update to Range Band Multiplier via socket.");
-    });
-    // -------------------------------------------------------------------------
-  }
-});
-
-// =============== On Scene Creation: Set Default Range Band Multiplier Flag ===============
-Hooks.on("createScene", async (scene, options, userId) => {
-  // When a new scene is created, if no Range Band Multiplier flag is present,
-  // set it to the value stored in the world setting "sizeMultiplier".
-  const existing = scene.getFlag("lgs-token-range-bands", "rangeBandMultiplier");
-  if (existing === undefined) {
-    const defaultMultiplier = game.settings.get("lgs-token-range-bands", "sizeMultiplier");
-    await scene.setFlag("lgs-token-range-bands", "rangeBandMultiplier", defaultMultiplier);
-  }
-});
-
-// =============== Update Measured Templates When the Scene's Multiplier Changes ===============
-Hooks.on("updateScene", async (scene, updateData, options, userId) => {
-  // Only act if the active scene is updated and the multiplier flag is being changed
-  if (canvas.scene && scene.id === canvas.scene.id && updateData.flags && updateData.flags["lgs-token-range-bands"] && updateData.flags["lgs-token-range-bands"].rangeBandMultiplier !== undefined) {
-    const newMultiplier = updateData.flags["lgs-token-range-bands"].rangeBandMultiplier;
-    // Find all measured templates that are part of our range bands (they have a baseDistance property stored in flags)
-    const templates = canvas.scene.templates.filter(t => t.flags["lgs-token-range-bands"]?.baseDistance !== undefined);
-    const updates = templates.map(t => {
-      const baseDistance = t.flags["lgs-token-range-bands"].baseDistance;
-      return {
-        _id: t.id,
-        distance: baseDistance * newMultiplier
-      };
-    });
-    if (updates.length > 0) {
-      await canvas.scene.updateEmbeddedDocuments("MeasuredTemplate", updates);
-    }
-  }
-});
-
-// =============== Token HUD Button for Range Bands ===============
-Hooks.on("renderTokenHUD", (hud, html, tokenData) => {
-  const token = canvas.tokens.get(tokenData._id);
-  if (!token) return;
-
-  // Create a new HUD button.
-  const btn = $(`
-    <div class="control-icon" title="Toggle Range Bands">
-      <i class="fas fa-circle"></i>
-    </div>
-  `);
-
-  btn.click(async () => {
-    // Look for any existing range-band templates for this token (global lookup by token id)
-    const existing = canvas.scene.templates.filter(t =>
-      t.flags["lgs-token-range-bands"]?.tokenId === token.id
-    );
-
-    if (existing.length > 0) {
-      const ids = existing.map(t => t.id);
-      // Player requests deletion via socket, GM deletes directly.
-      if (game.user.isGM) {
-        await canvas.scene.deleteEmbeddedDocuments("MeasuredTemplate", ids);
-      } else {
-        game.socket.emit("module.lgs-token-range-bands", {
-          action: "deleteTemplates",
-          templateIds: ids,
-          sceneId: canvas.scene.id,
-          senderId: game.user.id
-        });
-      }
-      return;
-    }
-
-    // Otherwise, create new global range-band templates.
-    const multiplier = canvas.scene.getFlag("lgs-token-range-bands", "rangeBandMultiplier") ||
-      game.settings.get("lgs-token-range-bands", "sizeMultiplier");
-
-    // Determine token size (using hitArea dimensions or points)
-    const sizeX = token.hitArea.width || (token.hitArea.points && token.hitArea.points[2]);
-    const sizeY = token.hitArea.height || (token.hitArea.points && token.hitArea.points[4]);
-
-    const x = token.document.x;
-    const y = token.document.y;
-    const centerX = x + sizeX / 2;
-    const centerY = y + sizeY / 2;
-    const color = "#0000FF";
-
-    const config = game.settings.get("lgs-token-range-bands", "distanceConfig") || [];
-    // Sort the base distances in ascending order.
-    const sortedDistances = config.map(item => item.distance).sort((a, b) => a - b);
-    // Compute the effective distances.
-    const distances = sortedDistances.map(d => d * multiplier);
-    const colors = ["#C75153", "#D3BE82", "#BBD8AB", "#63856B", "#7aa384", "#95c7a1", "#aae3b8", "#c8fad4", "9df5b2"];
-
-    // Create templates from the outermost inwards.
-    // Store the original (base) distance in the flags for later updating.
-    for (let i = distances.length - 1; i >= 0; i--) {
-      const templateData = {
-        t: "circle",
-        x: centerX,
-        y: centerY,
-        distance: distances[i],
-        direction: 0,
-        borderColor: color,
-        fillColor: colors[i] || "#ffffff",
-        flags: {
-          "lgs-token-range-bands": {
-            tokenId: token.id,
-            rangeIndex: i,
-            baseDistance: sortedDistances[i]
-          }
-        }
-      };
-      await canvas.scene.createEmbeddedDocuments("MeasuredTemplate", [templateData]);
-    }
-  });
-
-  // Append the new button to the HUD’s right-side controls.
-  html.find(".right").append(btn);
-});
-
-// =============== Remove Range Band Templates When a Token Moves ===============
-Hooks.on("updateToken", async (tokenDocument, updateData, options, userId) => {
-  // Only the primary GM should handle the deletion to avoid race conditions and permission errors.
-  if (!game.user.isGM) return;
-
-  // Only act if the token's position changes.
-  const positionChanged = ("x" in updateData) || ("y" in updateData);
-  if (!positionChanged) return;
-
-  // Find all range-band templates tied to this token on the current scene.
-  const existingTemplates = canvas.scene.templates.filter(t =>
-    t.flags["lgs-token-range-bands"]?.tokenId === tokenDocument.id
-  );
-  if (!existingTemplates.length) return;
-
-  // Delete the templates.
-  const idsToDelete = existingTemplates.map(t => t.id);
-  await canvas.scene.deleteEmbeddedDocuments("MeasuredTemplate", idsToDelete);
-});
-
-// =============== Remove Range Band Templates When a Token is Deleted ===============
-Hooks.on("deleteToken", async (tokenDocument, options, userId) => {
-  // Only the primary GM should handle the deletion to avoid race conditions.
-  if (!game.user.isGM) return;
-
-  // Find all range-band templates tied to this token on the current scene.
-  const existingTemplates = canvas.scene.templates.filter(t =>
-    t.flags["lgs-token-range-bands"]?.tokenId === tokenDocument.id
-  );
-  if (!existingTemplates.length) return;
-
-  // Delete the templates.
-  const idsToDelete = existingTemplates.map(t => t.id);
-  await canvas.scene.deleteEmbeddedDocuments("MeasuredTemplate", idsToDelete);
-});

@@ -1,43 +1,41 @@
 {
   "id": "lgs-token-range-bands",
-  "name": "lgs-token-range-bands",
   "title": "Lyinggods Token Range Bands",
-  "description": "Supports abstracted ranges such as Close, Short, Far, etc instead fiddly numbers in feet or meters.",
-  "version": "1.1.3",
+  "description": "Supports abstracted ranges such as Close, Short, Far, etc instead of fiddly numbers in feet or meters. Foundry 13/14 build: range bands drawn on the canvas and shared with all clients; narrative labels on the drag ruler and the token ruler.",
+  "version": "2.0.0",
   "authors": [
     {
       "name": "Lyinggod",
-	  "url": "https://github.com/Lyinggod"
+      "url": "https://github.com/Lyinggod"
     }
   ],
   "compatibility": {
-    "minimum": "11.0.0",
-    "verified": "12.999",
-    "maximum": "12.999"
+    "minimum": "13",
+    "verified": "14.368"
   },
-  "systems": [
-    {
-      "id": "starwarsffg",
-      "manifest": "https://path-to-starwarsffg-system/module.json",
-      "compatibility": {
-        "minimum": "1.8",
-        "verified": "1.905"
-      }
-    }
-  ],
   "socket": true,
   "relationships": {
     "requires": [
       {
         "id": "lib-wrapper",
-        "type": "module"
+        "type": "module",
+        "manifest": "https://github.com/ruipin/fvtt-lib-wrapper/releases/latest/download/module.json",
+        "compatibility": {
+          "minimum": "1.13.4.0",
+          "verified": "1.13.5.1"
+        }
       }
     ]
   },
- "esmodules": ["scripts/lgs-token-range-bands.js"],
+  "esmodules": [
+    "scripts/lgs-token-range-bands.js"
+  ],
   "languages": [],
-  "manifest": "https://github.com/Lyinggod/lgs-token-range-bands/releases/download/v1.1.3/module.json",
-  "download": "https://github.com/Lyinggod/lgs-token-range-bands/releases/download/v1.1.3/lgs-token-range-bands.zip",
-  "url": "https://github.com/Lyinggod/lgs-token-range-bands",
-  "readme": "https://github.com/Lyinggod/lgs-token-range-bands/blob/main/README.md"
+  "manifest": "https://github.com/Saberofblue/lgs-token-range-bands/releases/latest/download/module.json",
+  "download": "https://github.com/Saberofblue/lgs-token-range-bands/releases/download/v2.0.0/module.zip",
+  "url": "https://github.com/Saberofblue/lgs-token-range-bands",
+  "readme": "https://github.com/Saberofblue/lgs-token-range-bands/blob/v14/README.md",
+  "styles": [
+    "styles/token-range-bands.css"
+  ]
 }

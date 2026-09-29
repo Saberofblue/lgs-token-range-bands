@@ -1,4 +1,18 @@
-/* Style adjustments for context menu icons */
-#context-menu .fas.fa-circle {
-  color: #4caf50; /* Green circle icon for visual clarity */
+/* Token HUD toggle: green when bands are shown */
+#token-hud .control-icon.lgs-range-bands i {
+  color: #4caf50;
+}
+#token-hud .control-icon.lgs-range-bands.active {
+  border-color: #4caf50;
+  box-shadow: 0 0 6px #4caf50;
+}
+
+/* Ruler labels: the measured segment lies beyond the last configured range band */
+.waypoint-label.lgs-range-exceeded .total-measurement {
+  color: #ff5a5a;
+}
+
+/* Scene configuration fields */
+fieldset.lgs-range-bands-config .hint {
+  margin: 0 0 0.5rem;
 }
