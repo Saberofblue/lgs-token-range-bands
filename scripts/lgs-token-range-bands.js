@@ -325,12 +325,24 @@ Hooks.on("renderTokenHUD", (hud, html) => {
 /*  Scene configuration fields                  */
 /* -------------------------------------------- */
 
+const SCENE_TAB_ID = "lgs-range-bands";
+
+// Register a Scene Configuration tab of our own. Foundry renders the nav entry from the static TABS
+// list; the content panel is injected below on render. (Injecting into the Grid tab matched the
+// nav link before the panel and left the fieldset inside a non-clickable tab link.)
+Hooks.once("init", () => {
+  const tabs = foundry.applications?.sheets?.SceneConfig?.TABS?.sheet?.tabs;
+  if (Array.isArray(tabs) && !tabs.some((t) => t.id === SCENE_TAB_ID)) {
+    tabs.push({ id: SCENE_TAB_ID, icon: "fa-solid fa-ruler", label: "Range Bands" });
+  }
+});
+
 Hooks.on("renderSceneConfig", (app, html) => {
   const root = html instanceof HTMLElement ? html : html?.[0];
   const scene = app.document ?? app.object;
   if (!root || !scene) return;
-  const gridTab = root.querySelector('.tab[data-tab="grid"], [data-tab="grid"]');
-  if (!gridTab || gridTab.querySelector(".lgs-range-bands-config")) return;
+  const form = app.form ?? root.querySelector("form") ?? root;
+  if (form.querySelector(".lgs-range-bands-config")) return;
 
   const multiplier = scene.getFlag(MODULE_ID, "rangeBandMultiplier") ?? game.settings.get(MODULE_ID, "sizeMultiplier");
   const measurementOption = scene.getFlag(MODULE_ID, "measurementOption") || "narrative";
@@ -358,7 +370,25 @@ Hooks.on("renderSceneConfig", (app, html) => {
         <select name="flags.${MODULE_ID}.measurementOption">${options}</select>
       </div>
     </div>`;
-  gridTab.append(fieldset);
+
+  // Our tab was registered at init: give it a content panel that core's tab switching toggles.
+  const navLink = form.querySelector(`nav.tabs [data-tab="${SCENE_TAB_ID}"]`);
+  if (navLink) {
+    const section = document.createElement("div");
+    section.className = "tab scrollable";
+    section.dataset.group = "sheet";
+    section.dataset.tab = SCENE_TAB_ID;
+    if (app.tabGroups?.sheet === SCENE_TAB_ID) section.classList.add("active");
+    section.append(fieldset);
+    const footer = form.querySelector("footer.form-footer");
+    if (footer) footer.before(section);
+    else form.append(section);
+    return;
+  }
+
+  // No registered tab (older core): fall back to the Grid tab's content panel, never its nav link.
+  const gridTab = form.querySelector(`.tab[data-group="sheet"][data-tab="grid"]`) ?? form.querySelector(`section.tab[data-tab="grid"], div.tab[data-tab="grid"]`);
+  if (gridTab) gridTab.append(fieldset);
 });
 
 // new scenes start with the default multiplier
